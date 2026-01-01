@@ -3,6 +3,9 @@ import sys
 import random
 import math
 import heapq
+import time
+import csv
+import os
 
 # --- CONFIGURATION ---
 GRID_W = 50
@@ -10,7 +13,7 @@ GRID_H = 50
 CELL_SIZE = 15
 SCREEN_WIDTH = GRID_W * CELL_SIZE
 SCREEN_HEIGHT = GRID_H * CELL_SIZE
-FPS = 5
+FPS = 30
 
 # Colors
 WHITE = (255, 255, 255)
@@ -34,6 +37,75 @@ GOAL = 2
 HAZARD = 3
 DEPOT = 4
 SAFE = 5
+
+# --- DATA LOGGER CLASS ---
+class DataLogger:
+    def __init__(self):
+        self.start_time = time.time()
+        self.sim_steps = 0
+        self.bricks_picked = 0
+        self.safe_tiles_built = 0
+        self.initial_hazards = 0
+        self.current_hazards = 0
+        self.mission_steps = 0
+        self.history = [] # For CSV
+        
+        # Lists to store completed task durations (in steps)
+        self.completed_searches = []    # Time spent looking for a brick
+        self.completed_transports = []  # Time spent holding a brick
+
+    def log_duration(self, task_type, duration):
+        if task_type == "SEARCH":
+            self.completed_searches.append(duration)
+        elif task_type == "TRANSPORT":
+            self.completed_transports.append(duration)
+
+    def update(self, current_hazards):
+        self.sim_steps += 1
+        self.current_hazards = current_hazards
+        
+        # Record stats once per second
+        if self.sim_steps % 30 == 0:
+            elapsed = time.time() - self.start_time
+            row = [
+                round(elapsed, 2),
+                self.sim_steps,
+                self.safe_tiles_built,
+                self.current_hazards,
+                self.bricks_picked
+            ]
+            self.history.append(row)
+
+    def save_to_file(self, agents_list, filename="simulation_log.csv"):
+        bricks_in_transit = sum(1 for a in agents_list if a.has_brick)
+        
+        with open(filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Time(s)", "Steps", "Safe_Built", "Hazards_Left", "Bricks_Picked"])
+            writer.writerows(self.history)
+        print(f"Data saved to {filename}")
+
+        with open("agent_durations.csv", 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Task_Type", "Duration_Steps"])
+            for d in self.completed_searches:
+                writer.writerow(["SEARCH", d])
+            for d in self.completed_transports:
+                writer.writerow(["TRANSPORT", d])
+        print("Durations saved to agent_durations.csv")
+
+        with open("simulation_summary.txt", 'w') as f:
+            f.write(f"Total Time: {time.time() - self.start_time:.2f}s\n")
+            f.write(f"Total Steps: {self.sim_steps}\n")
+            f.write(f"Safe Tiles Built: {self.safe_tiles_built}\n")
+            f.write(f"Mission Robot Steps: {self.mission_steps}\n")
+            f.write(f"Bricks Picked: {self.bricks_picked}\n")
+            f.write(f"Bricks Still in Transit: {bricks_in_transit}\n")
+            
+            avg_search = sum(self.completed_searches)/len(self.completed_searches) if self.completed_searches else 0
+            avg_trans = sum(self.completed_transports)/len(self.completed_transports) if self.completed_transports else 0
+            f.write(f"Avg Search Steps: {avg_search:.1f}\n")
+            f.write(f"Avg Transport Steps: {avg_trans:.1f}\n")
 
 # --- A* PATHFINDING ---
 def find_path_astar(start, goal, env_grid, retired_set):
@@ -65,7 +137,6 @@ def find_path_astar(start, goal, env_grid, retired_set):
 
         for nx, ny in neighbors:
             if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
-                # OBSTACLE CHECK:
                 if env_grid[nx][ny] == HAZARD: continue
                 if (nx, ny) in retired_set: continue
 
@@ -95,38 +166,31 @@ class MissionRobot:
         self.move_timer = 0
 
         goal_pos = (49, 0)
-        
-        # 1. PLAN PATH
         self.path = find_path_astar((self.x, self.y), goal_pos, env.grid, retired_positions)
 
         if self.path:
             self.state = "MOVING"
             next_step = self.path[0] 
             
-            # 2. TRAFFIC CHECK
-            # Wait if ANY active robot is in the way
             if next_step in active_positions:
                 pass 
             else:
                 self.x, self.y = next_step
+                env.logger.mission_steps += 1
                 if env.grid[self.x][self.y] == GOAL:
                     self.state = "DONE"
                     print("MISSION SUCCESS!")
         else:
             self.state = "WAITING"
-            self.path = [] # Clear path if none found
+            self.path = []
 
     def draw(self, surface):
         cx = self.x * CELL_SIZE + CELL_SIZE // 2
         cy = self.y * CELL_SIZE + CELL_SIZE // 2
-        
-        # Draw Hollow Dark Green Diamond
         half_size = CELL_SIZE // 2 - 2
         points = [
-            (cx, cy - half_size),           # Top
-            (cx + half_size, cy),           # Right
-            (cx, cy + half_size),           # Bottom
-            (cx - half_size, cy)            # Left
+            (cx, cy - half_size), (cx + half_size, cy), 
+            (cx, cy + half_size), (cx - half_size, cy)
         ]
         pygame.draw.lines(surface, DARK_GREEN, True, points, 2)
 
@@ -143,8 +207,17 @@ class Builder:
         self.heading_y = math.sin(angle)
         self.bias_strength = 0.0 
         self.robots_informed = 0
+        self.can_nucleate = True
+        self.trajectory = [] 
+        self.traj_color = (random.randint(50, 200), random.randint(50, 200), random.randint(50, 200))
+        self.current_task_timer = 0
 
     def update(self, env, occupied_positions, all_agents):
+        self.trajectory.append((self.x, self.y))
+        
+        if self.state in ["WANDER", "MESSENGER"]:
+            self.current_task_timer += 1
+
         if self.state == "RETIRED": return
 
         if self.state == "MESSENGER":
@@ -152,7 +225,6 @@ class Builder:
                 if env.grid[self.x][self.y] in [EMPTY, DEPOT, START]:
                     self.state = "RETIRED"
                     return
-            
             neighbors = self.get_neighbors()
             for nx, ny in neighbors:
                 for other in all_agents:
@@ -166,9 +238,7 @@ class Builder:
                 if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
                     if env.grid[nx][ny] == GOAL:
                         self.state = "MESSENGER"
-                        print(f"Robot {self.id} found GOAL! Epidemic Started.")
                         return
-                
                 for other in all_agents:
                     if other.id != self.id and other.x == nx and other.y == ny:
                         if other.state == "RETIRED":
@@ -199,8 +269,9 @@ class Builder:
                         self.try_build(env, nx, ny)
                         should_repulse = True 
                 else:
-                    if cell in [HAZARD, SAFE]: should_repulse = True
-                    if cell == DEPOT: self.has_brick = True
+                    # FIX: Only bounce off HAZARD. Allow walking on SAFE (Bridge).
+                    if cell == HAZARD: should_repulse = True
+                    if cell == DEPOT: should_repulse = False 
 
             if should_repulse:
                 repulsion_x += (self.x - nx); repulsion_y += (self.y - ny)
@@ -227,6 +298,7 @@ class Builder:
             weights = []
             for mx, my in valid_moves:
                 w = 1.0
+                cell_type = env.grid[mx][my]
                 if self.bias_strength > 0:
                     dx = mx - self.x; dy = my - self.y
                     align = dx*self.heading_x + dy*self.heading_y
@@ -243,6 +315,9 @@ class Builder:
             
             if self.state == "WANDER" and env.grid[self.x][self.y] == DEPOT and not self.has_brick:
                 self.has_brick = True
+                env.logger.bricks_picked += 1
+                env.logger.log_duration("SEARCH", self.current_task_timer)
+                self.current_task_timer = 0
 
     def try_build(self, env, nx, ny):
         if self.state != "WANDER": return
@@ -257,11 +332,16 @@ class Builder:
             if 0 <= bx < GRID_W and 0 <= by < GRID_H:
                 if env.grid[bx][by] in [START, SAFE]: supported = True; break
         
-        if not supported and random.random() < 0.01: supported = True 
+        if self.can_nucleate and not supported and random.random() < 0.1: 
+            supported = True 
         
         if supported:
             env.grid[nx][ny] = SAFE
             self.has_brick = False
+            self.can_nucleate = False
+            env.logger.safe_tiles_built += 1
+            env.logger.log_duration("TRANSPORT", self.current_task_timer)
+            self.current_task_timer = 0
 
     def get_neighbors(self):
         n = []
@@ -278,12 +358,8 @@ class Builder:
         col = BROWN
         if self.state == "MESSENGER": col = CYAN
         elif self.state == "RETIRED": col = DARK_GREY
-        
-        pygame.draw.line(surface, col, (x_pos + padding, y_pos + padding), 
-                         (x_pos + CELL_SIZE - padding, y_pos + CELL_SIZE - padding), 3)
-        pygame.draw.line(surface, col, (x_pos + padding, y_pos + CELL_SIZE - padding), 
-                         (x_pos + CELL_SIZE - padding, y_pos + padding), 3)
-        
+        pygame.draw.line(surface, col, (x_pos + padding, y_pos + padding), (x_pos + CELL_SIZE - padding, y_pos + CELL_SIZE - padding), 3)
+        pygame.draw.line(surface, col, (x_pos + padding, y_pos + CELL_SIZE - padding), (x_pos + CELL_SIZE - padding, y_pos + padding), 3)
         if self.has_brick and self.state == "WANDER":
             cx = x_pos + CELL_SIZE // 2; cy = y_pos + CELL_SIZE // 2; r = CELL_SIZE // 4
             pygame.draw.circle(surface, ORANGE, (cx, cy), r)
@@ -292,6 +368,7 @@ class Environment:
     def __init__(self):
         self.width = GRID_W; self.height = GRID_H
         self.grid = [[EMPTY for _ in range(self.height)] for _ in range(self.width)]
+        self.logger = DataLogger()
         self.setup_landscape()
         self.agents = []
         poss = []
@@ -300,25 +377,27 @@ class Environment:
         chosen = random.sample(poss, 30)
         for i in range(30):
             self.agents.append(Builder(chosen[i][0], chosen[i][1], i))
-        
         self.mission_robot = MissionRobot(0, 49)
+        self.show_swarm = True
 
     def setup_landscape(self):
         for x in range(self.width):
             for y in range(self.height): self.grid[x][y] = EMPTY
-        
         self.grid[0][self.width-1] = START
         self.grid[self.height-1][0] = GOAL
-
         line_start_x, line_start_y = self.width // 3, self.height // 10
         line_end_x, line_end_y = self.width - (self.width // 10), self.height - (self.height // 3)
         river_thickness = 12
+        
+        hazard_count = 0
         for x in range(self.width):
             for y in range(self.height):
                 dist = self._distance_point_to_segment(x, y, line_start_x, line_start_y, line_end_x, line_end_y)
                 if dist < river_thickness / 2:
                     if self.grid[x][y] not in [START, GOAL]:
                         self.grid[x][y] = HAZARD
+                        hazard_count += 1
+        self.logger.initial_hazards = hazard_count
 
         placed = 0; attempts = 0
         while placed < 15 and attempts < 2000:
@@ -343,25 +422,19 @@ class Environment:
 
     def update(self):
         occupied = set()
-        for a in self.agents:
-            occupied.add((a.x, a.y))
-        
-        # Mission bot is occupied too
-        occupied.add((self.mission_robot.x, self.mission_robot.y))
-
-        for a in self.agents: 
-            a.update(self, occupied, self.agents)
-        
-        # NEW: Re-calculate positions for Mission Robot so it sees current state
         active_pos = set()
         retired_pos = set()
         for a in self.agents:
-            if a.state == "RETIRED":
-                retired_pos.add((a.x, a.y))
-            else:
-                active_pos.add((a.x, a.y))
+            occupied.add((a.x, a.y))
+            if a.state == "RETIRED": retired_pos.add((a.x, a.y))
+            else: active_pos.add((a.x, a.y))
         
+        occupied.add((self.mission_robot.x, self.mission_robot.y))
+        for a in self.agents: a.update(self, occupied, self.agents)
         self.mission_robot.update(self, retired_pos, active_pos)
+        
+        hazards_left = self.logger.initial_hazards - self.logger.safe_tiles_built
+        self.logger.update(hazards_left)
 
     def draw(self, surface):
         for x in range(self.width):
@@ -375,54 +448,131 @@ class Environment:
                 elif t==DEPOT: c=ORANGE
                 elif t==SAFE: c=YELLOW
                 pygame.draw.rect(surface, c, r); pygame.draw.rect(surface, GREY, r, 1)
-        
-        # Draw Planned Path
         if self.mission_robot.path:
             for (px, py) in self.mission_robot.path:
                 pygame.draw.rect(surface, LIGHT_BLUE, (px * CELL_SIZE + 2, py * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4))
-
-        for a in self.agents: a.draw(surface)
+        
+        if self.show_swarm:
+            for a in self.agents: a.draw(surface)
+        
         self.mission_robot.draw(surface)
+
+    def save_trajectories(self):
+        folder = "trajectories"
+        if not os.path.exists(folder): os.makedirs(folder)
+        
+        original_show = self.show_swarm
+        self.show_swarm = False
+        map_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.draw(map_surf)
+        self.show_swarm = original_show
+
+        for agent in self.agents:
+            agent_surf = map_surf.copy()
+            if len(agent.trajectory) > 1:
+                points = [(p[0]*CELL_SIZE + CELL_SIZE//2, p[1]*CELL_SIZE + CELL_SIZE//2) for p in agent.trajectory]
+                pygame.draw.lines(agent_surf, agent.traj_color, False, points, 2)
+                pygame.draw.circle(agent_surf, GREEN, points[0], 3)
+                pygame.draw.circle(agent_surf, RED, points[-1], 3)
+            pygame.image.save(agent_surf, f"{folder}/builder_{agent.id}.png")
+        print("Done saving images.")
+
+    def save_map(self, filename="custom_map.csv"):
+        with open(filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(self.grid)
+        print(f"Map saved to {filename}")
+
+    def load_map(self, filename="wide_river_with_headlands.csv"):
+        if not os.path.exists(filename):
+            print(f"File {filename} not found.")
+            return
+        try:
+            with open(filename, 'r') as f:
+                reader = csv.reader(f)
+                loaded_grid = [[int(cell) for cell in row] for row in reader]
+            if len(loaded_grid) == self.width and len(loaded_grid[0]) == self.height:
+                self.grid = loaded_grid
+                print(f"Map loaded from {filename}")
+            else:
+                print(f"Map size mismatch.")
+        except Exception as e:
+            print(f"Error loading map: {e}")
 
 def main():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     clock = pygame.time.Clock()
-    
-    font = pygame.font.Font(None, 36)
-
+    font = pygame.font.Font(None, 24)
     env = Environment()
     run = True
-    paused = True # Start Paused
+    paused = True 
+    mission_complete = False 
+    show_ui = True
 
     while run:
+        if env.mission_robot.state == "DONE" and not mission_complete:
+            mission_complete = True
+            paused = True
+            env.logger.save_to_file(env.agents)
+            env.save_trajectories()
+
         for e in pygame.event.get():
             if e.type == pygame.QUIT: run = False
             
             if e.type == pygame.MOUSEBUTTONDOWN: 
                 mx, my = pygame.mouse.get_pos()
                 gx, gy = mx//CELL_SIZE, my//CELL_SIZE
-                if env.grid[gx][gy] == HAZARD: env.grid[gx][gy] = SAFE
+                if 0 <= gx < GRID_W and 0 <= gy < GRID_H:
+                    current = env.grid[gx][gy]
+                    if e.button == 1:
+                        if current == EMPTY: env.grid[gx][gy] = HAZARD
+                        elif current == HAZARD: env.grid[gx][gy] = SAFE
+                        elif current == SAFE: env.grid[gx][gy] = DEPOT
+                        elif current == DEPOT: env.grid[gx][gy] = EMPTY
+                    elif e.button == 3:
+                        if current == EMPTY: env.grid[gx][gy] = DEPOT
+                        elif current == DEPOT: env.grid[gx][gy] = SAFE
+                        elif current == SAFE: env.grid[gx][gy] = HAZARD
+                        elif current == HAZARD: env.grid[gx][gy] = EMPTY
             
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_SPACE:
-                    paused = not paused
+                    if not mission_complete: paused = not paused
+                elif e.key == pygame.K_s:
+                    env.save_map()
+                elif e.key == pygame.K_l:
+                    env.load_map()
+                elif e.key == pygame.K_h:
+                    env.show_swarm = not env.show_swarm
+                elif e.key == pygame.K_r: 
+                    env = Environment() 
+                    mission_complete = False
+                    paused = True
+                    print("Simulation Reset.")
+                elif e.key == pygame.K_t: 
+                    show_ui = not show_ui
         
-        if not paused:
-            env.update()
-        
+        if not paused: env.update()
         screen.fill(BLACK)
         env.draw(screen)
 
-        if paused:
-            text_surf = font.render("PAUSED (Press Space)", True, WHITE)
-            text_rect = text_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
-            box_rect = text_rect.inflate(20, 20)
-            pygame.draw.rect(screen, BLACK, box_rect)
-            pygame.draw.rect(screen, WHITE, box_rect, 2)
-            screen.blit(text_surf, text_rect)
+        if show_ui:
+            if mission_complete:
+                text_surf = font.render("TASK COMPLETED - DATA SAVED (R:Reset)", True, GREEN)
+                text_rect = text_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+                box_rect = text_rect.inflate(20, 20)
+                pygame.draw.rect(screen, BLACK, box_rect); pygame.draw.rect(screen, WHITE, box_rect, 2)
+                screen.blit(text_surf, text_rect)
+            elif paused:
+                text_surf = font.render("PAUSED (S:Save L:Load H:Hide R:Reset T:UI Space:Play)", True, WHITE)
+                text_rect = text_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+                box_rect = text_rect.inflate(20, 20)
+                pygame.draw.rect(screen, BLACK, box_rect); pygame.draw.rect(screen, WHITE, box_rect, 2)
+                screen.blit(text_surf, text_rect)
 
-        pygame.display.set_caption(f"Swarm Sim | {'PAUSED' if paused else 'RUNNING'}")
+        status_text = "COMPLETED" if mission_complete else ('PAUSED' if paused else 'RUNNING')
+        pygame.display.set_caption(f"Swarm Sim | {status_text}")
         pygame.display.flip()
         clock.tick(FPS)
     pygame.quit(); sys.exit()
