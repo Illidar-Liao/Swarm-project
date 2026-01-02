@@ -29,6 +29,7 @@ CYAN = (0, 255, 255)     # Messenger
 DARK_GREY = (100, 100, 100) # Retired
 DARK_GREEN = (0, 100, 0)    # Mission Robot
 LIGHT_BLUE = (173, 216, 230) # Planned Path
+ANCHOR_COLOR = (0, 0, 0)     # HRI Anchor Crosshair (Black for visibility)
 
 # Cell Types
 EMPTY = 0
@@ -296,9 +297,23 @@ class Builder:
         
         if valid_moves:
             weights = []
+            
+            # Pre-calculate distance to anchor for current position
+            curr_dist_to_anchor = 0
+            if env.hri_active:
+                curr_dist_to_anchor = math.sqrt((self.x - env.anchor_x)**2 + (self.y - env.anchor_y)**2)
+
             for mx, my in valid_moves:
                 w = 1.0
                 cell_type = env.grid[mx][my]
+                
+                # --- HRI ATTRACTION ---
+                if self.state == "WANDER" and self.has_brick and env.hri_active:
+                    move_dist = math.sqrt((mx - env.anchor_x)**2 + (my - env.anchor_y)**2)
+                    if move_dist < curr_dist_to_anchor:
+                        w += 20.0 # High Bonus for moving Closer
+
+                # --- INERTIA ---
                 if self.bias_strength > 0:
                     dx = mx - self.x; dy = my - self.y
                     align = dx*self.heading_x + dy*self.heading_y
@@ -379,6 +394,33 @@ class Environment:
             self.agents.append(Builder(chosen[i][0], chosen[i][1], i))
         self.mission_robot = MissionRobot(0, 49)
         self.show_swarm = True
+        
+        # HRI ANCHOR
+        self.hri_active = False 
+        self.anchor_x = 25 
+        self.anchor_y = 25
+        self.reset_agents()
+
+    def full_reset(self):
+        self.logger = DataLogger()
+        self.mission_robot = MissionRobot(0, 49)
+        self.hri_active = False
+        self.setup_landscape()
+        self.reset_agents()
+
+    def reset_agents(self):
+        self.agents = []
+        poss = []
+        for x in range(1, 15):
+            for y in range(40, 49): poss.append((x, y))
+        chosen = random.sample(poss, 30)
+        
+        sum_x, sum_y = 0, 0
+        for i in range(30):
+            bx, by = chosen[i]
+            self.agents.append(Builder(bx, by, i))
+            sum_x += bx; sum_y += by
+        self.anchor_x = int(sum_x / 30); self.anchor_y = int(sum_y / 30)
 
     def setup_landscape(self):
         for x in range(self.width):
@@ -432,7 +474,6 @@ class Environment:
         occupied.add((self.mission_robot.x, self.mission_robot.y))
         for a in self.agents: a.update(self, occupied, self.agents)
         self.mission_robot.update(self, retired_pos, active_pos)
-        
         hazards_left = self.logger.initial_hazards - self.logger.safe_tiles_built
         self.logger.update(hazards_left)
 
@@ -456,17 +497,23 @@ class Environment:
             for a in self.agents: a.draw(surface)
         
         self.mission_robot.draw(surface)
+        
+        # DRAW ANCHOR
+        if self.hri_active:
+            ax = self.anchor_x * CELL_SIZE + CELL_SIZE // 2
+            ay = self.anchor_y * CELL_SIZE + CELL_SIZE // 2
+            pygame.draw.line(surface, ANCHOR_COLOR, (ax - 10, ay), (ax + 10, ay), 2)
+            pygame.draw.line(surface, ANCHOR_COLOR, (ax, ay - 10), (ax, ay + 10), 2)
+            pygame.draw.circle(surface, ANCHOR_COLOR, (ax, ay), 15, 2)
 
     def save_trajectories(self):
         folder = "trajectories"
         if not os.path.exists(folder): os.makedirs(folder)
-        
         original_show = self.show_swarm
         self.show_swarm = False
         map_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.draw(map_surf)
         self.show_swarm = original_show
-
         for agent in self.agents:
             agent_surf = map_surf.copy()
             if len(agent.trajectory) > 1:
@@ -479,25 +526,24 @@ class Environment:
 
     def save_map(self, filename="custom_map.csv"):
         with open(filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(self.grid)
+            writer = csv.writer(f); writer.writerows(self.grid)
         print(f"Map saved to {filename}")
 
-    def load_map(self, filename="wide_river_with_headlands.csv"):
-        if not os.path.exists(filename):
-            print(f"File {filename} not found.")
-            return
+    def load_map(self, filename="custom_map.csv"):
+        if not os.path.exists(filename): print(f"File {filename} not found."); return
         try:
             with open(filename, 'r') as f:
-                reader = csv.reader(f)
-                loaded_grid = [[int(cell) for cell in row] for row in reader]
+                reader = csv.reader(f); loaded_grid = [[int(cell) for cell in row] for row in reader]
             if len(loaded_grid) == self.width and len(loaded_grid[0]) == self.height:
                 self.grid = loaded_grid
+                h_count = 0
+                for x in range(self.width):
+                    for y in range(self.height):
+                        if self.grid[x][y] == HAZARD: h_count += 1
+                self.logger.initial_hazards = h_count
                 print(f"Map loaded from {filename}")
-            else:
-                print(f"Map size mismatch.")
-        except Exception as e:
-            print(f"Error loading map: {e}")
+            else: print(f"Map size mismatch.")
+        except Exception as e: print(f"Error loading map: {e}")
 
 def main():
     pygame.init()
@@ -525,12 +571,12 @@ def main():
                 gx, gy = mx//CELL_SIZE, my//CELL_SIZE
                 if 0 <= gx < GRID_W and 0 <= gy < GRID_H:
                     current = env.grid[gx][gy]
-                    if e.button == 1:
+                    if e.button == 1: # Left Click
                         if current == EMPTY: env.grid[gx][gy] = HAZARD
                         elif current == HAZARD: env.grid[gx][gy] = SAFE
                         elif current == SAFE: env.grid[gx][gy] = DEPOT
                         elif current == DEPOT: env.grid[gx][gy] = EMPTY
-                    elif e.button == 3:
+                    elif e.button == 3: # Right Click
                         if current == EMPTY: env.grid[gx][gy] = DEPOT
                         elif current == DEPOT: env.grid[gx][gy] = SAFE
                         elif current == SAFE: env.grid[gx][gy] = HAZARD
@@ -539,19 +585,26 @@ def main():
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_SPACE:
                     if not mission_complete: paused = not paused
-                elif e.key == pygame.K_s:
-                    env.save_map()
-                elif e.key == pygame.K_l:
-                    env.load_map()
-                elif e.key == pygame.K_h:
-                    env.show_swarm = not env.show_swarm
+                elif e.key == pygame.K_s: env.save_map()
+                elif e.key == pygame.K_l: env.load_map()
+                elif e.key == pygame.K_h: env.show_swarm = not env.show_swarm
                 elif e.key == pygame.K_r: 
-                    env = Environment() 
+                    env.full_reset()
                     mission_complete = False
                     paused = True
-                    print("Simulation Reset.")
-                elif e.key == pygame.K_t: 
-                    show_ui = not show_ui
+                    print("Simulation FULL Reset.")
+                elif e.key == pygame.K_t: show_ui = not show_ui
+                
+                # HRI
+                elif e.key == pygame.K_a:
+                    env.hri_active = not env.hri_active
+                    print(f"HRI Active: {env.hri_active}")
+                
+                if env.hri_active:
+                    if e.key == pygame.K_UP: env.anchor_y = max(0, env.anchor_y - 1)
+                    elif e.key == pygame.K_DOWN: env.anchor_y = min(GRID_H-1, env.anchor_y + 1)
+                    elif e.key == pygame.K_LEFT: env.anchor_x = max(0, env.anchor_x - 1)
+                    elif e.key == pygame.K_RIGHT: env.anchor_x = min(GRID_W-1, env.anchor_x + 1)
         
         if not paused: env.update()
         screen.fill(BLACK)
@@ -565,14 +618,14 @@ def main():
                 pygame.draw.rect(screen, BLACK, box_rect); pygame.draw.rect(screen, WHITE, box_rect, 2)
                 screen.blit(text_surf, text_rect)
             elif paused:
-                text_surf = font.render("PAUSED (S:Save L:Load H:Hide R:Reset T:UI Space:Play)", True, WHITE)
+                text_surf = font.render("PAUSED (A:HRI H:Hide S:Save L:Load R:Reset Space:Play)", True, WHITE)
                 text_rect = text_surf.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
                 box_rect = text_rect.inflate(20, 20)
                 pygame.draw.rect(screen, BLACK, box_rect); pygame.draw.rect(screen, WHITE, box_rect, 2)
                 screen.blit(text_surf, text_rect)
 
         status_text = "COMPLETED" if mission_complete else ('PAUSED' if paused else 'RUNNING')
-        pygame.display.set_caption(f"Swarm Sim | {status_text}")
+        pygame.display.set_caption(f"Swarm Sim | {status_text} | HRI: {'ON' if env.hri_active else 'OFF'}")
         pygame.display.flip()
         clock.tick(FPS)
     pygame.quit(); sys.exit()
