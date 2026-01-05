@@ -25,11 +25,10 @@ ORANGE = (255, 165, 0)
 YELLOW = (255, 255, 0)
 GREY = (200, 200, 200)
 BROWN = (139, 69, 19)    # Normal Builder
-CYAN = (0, 255, 255)     # Messenger
 DARK_GREY = (100, 100, 100) # Retired
 DARK_GREEN = (0, 100, 0)    # Mission Robot
 LIGHT_BLUE = (173, 216, 230) # Planned Path
-ANCHOR_COLOR = (0, 0, 0)     # HRI Anchor Crosshair (Black for visibility)
+ANCHOR_COLOR = (0, 0, 0)     # HRI Anchor Crosshair
 
 # Cell Types
 EMPTY = 0
@@ -173,6 +172,7 @@ class MissionRobot:
             self.state = "MOVING"
             next_step = self.path[0] 
             
+            # Simple Traffic Check: Wait if active robot is in the way
             if next_step in active_positions:
                 pass 
             else:
@@ -201,13 +201,12 @@ class Builder:
         self.x = x
         self.y = y
         self.has_brick = False
-        self.state = "WANDER"
+        self.state = "WANDER" # States: WANDER, RETIRED
         
         angle = random.uniform(0, 2 * math.pi)
         self.heading_x = math.cos(angle)
         self.heading_y = math.sin(angle)
         self.bias_strength = 0.0 
-        self.robots_informed = 0
         self.can_nucleate = True
         self.trajectory = [] 
         self.traj_color = (random.randint(50, 200), random.randint(50, 200), random.randint(50, 200))
@@ -216,35 +215,42 @@ class Builder:
     def update(self, env, occupied_positions, all_agents):
         self.trajectory.append((self.x, self.y))
         
-        if self.state in ["WANDER", "MESSENGER"]:
+        if self.state == "WANDER":
             self.current_task_timer += 1
 
         if self.state == "RETIRED": return
 
-        if self.state == "MESSENGER":
-            if self.robots_informed >= 5:
-                if env.grid[self.x][self.y] in [EMPTY, DEPOT, START]:
-                    self.state = "RETIRED"
-                    return
-            neighbors = self.get_neighbors()
-            for nx, ny in neighbors:
-                for other in all_agents:
-                    if other.id != self.id and other.x == nx and other.y == ny:
-                        self.robots_informed += 1
-                        if other.state == "WANDER": other.state = "MESSENGER"
-
+        # Check for Retirement trigger (Seeing a Retired robot or the Goal)
         if self.state == "WANDER":
             neighbors = self.get_neighbors()
+            should_retire = False
+            
+            # Check 1: Found Goal?
             for nx, ny in neighbors:
                 if 0 <= nx < GRID_W and 0 <= ny < GRID_H:
                     if env.grid[nx][ny] == GOAL:
-                        self.state = "MESSENGER"
-                        return
-                for other in all_agents:
-                    if other.id != self.id and other.x == nx and other.y == ny:
-                        if other.state == "RETIRED":
-                            self.state = "MESSENGER"
-                            return
+                        should_retire = True
+                        break
+            
+            # Check 2: Found a Retired Robot?
+            if not should_retire:
+                for nx, ny in neighbors:
+                    for other in all_agents:
+                        if other.id != self.id and other.x == nx and other.y == ny:
+                            if other.state == "RETIRED":
+                                should_retire = True
+                                break
+                    if should_retire: break
+            
+            # Execute Retirement Logic
+            if should_retire:
+                # If on safe ground (Empty/Depot/Start), retire immediately
+                if env.grid[self.x][self.y] in [EMPTY, DEPOT, START]:
+                    self.state = "RETIRED"
+                    # print(f"Robot {self.id} retiring.")
+                    return
+                # Note: If on Hazard/Safe(Bridge), they stay WANDER until they wander off it.
+                # This naturally clears the bridge without explicit 'Messenger' state.
 
         self.update_heading(env)
         self.move(env, occupied_positions)
@@ -262,17 +268,16 @@ class Builder:
             cell = env.grid[nx][ny]
             should_repulse = False
             
-            if self.state == "MESSENGER":
+            # WANDER Logic
+            if self.has_brick:
+                if cell == HAZARD:
+                    self.try_build(env, nx, ny)
+                    should_repulse = True 
+            else:
+                # Only bounce off HAZARD. Allow walking on SAFE (Bridge).
                 if cell == HAZARD: should_repulse = True
-            elif self.state == "WANDER":
-                if self.has_brick:
-                    if cell == HAZARD:
-                        self.try_build(env, nx, ny)
-                        should_repulse = True 
-                else:
-                    # FIX: Only bounce off HAZARD. Allow walking on SAFE (Bridge).
-                    if cell == HAZARD: should_repulse = True
-                    if cell == DEPOT: should_repulse = False 
+                # If I hit DEPOT, Pickup. No repulsion.
+                if cell == DEPOT: should_repulse = False 
 
             if should_repulse:
                 repulsion_x += (self.x - nx); repulsion_y += (self.y - ny)
@@ -298,7 +303,6 @@ class Builder:
         if valid_moves:
             weights = []
             
-            # Pre-calculate distance to anchor for current position
             curr_dist_to_anchor = 0
             if env.hri_active:
                 curr_dist_to_anchor = math.sqrt((self.x - env.anchor_x)**2 + (self.y - env.anchor_y)**2)
@@ -371,10 +375,11 @@ class Builder:
         y_pos = self.y * CELL_SIZE
         padding = 3
         col = BROWN
-        if self.state == "MESSENGER": col = CYAN
-        elif self.state == "RETIRED": col = DARK_GREY
+        if self.state == "RETIRED": col = DARK_GREY
+        
         pygame.draw.line(surface, col, (x_pos + padding, y_pos + padding), (x_pos + CELL_SIZE - padding, y_pos + CELL_SIZE - padding), 3)
         pygame.draw.line(surface, col, (x_pos + padding, y_pos + CELL_SIZE - padding), (x_pos + CELL_SIZE - padding, y_pos + padding), 3)
+        
         if self.has_brick and self.state == "WANDER":
             cx = x_pos + CELL_SIZE // 2; cy = y_pos + CELL_SIZE // 2; r = CELL_SIZE // 4
             pygame.draw.circle(surface, ORANGE, (cx, cy), r)
@@ -498,7 +503,6 @@ class Environment:
         
         self.mission_robot.draw(surface)
         
-        # DRAW ANCHOR
         if self.hri_active:
             ax = self.anchor_x * CELL_SIZE + CELL_SIZE // 2
             ay = self.anchor_y * CELL_SIZE + CELL_SIZE // 2
@@ -529,7 +533,7 @@ class Environment:
             writer = csv.writer(f); writer.writerows(self.grid)
         print(f"Map saved to {filename}")
 
-    def load_map(self, filename="custom_map.csv"):
+    def load_map(self, filename="wide_river_with_headlands.csv"):
         if not os.path.exists(filename): print(f"File {filename} not found."); return
         try:
             with open(filename, 'r') as f:
@@ -571,12 +575,12 @@ def main():
                 gx, gy = mx//CELL_SIZE, my//CELL_SIZE
                 if 0 <= gx < GRID_W and 0 <= gy < GRID_H:
                     current = env.grid[gx][gy]
-                    if e.button == 1: # Left Click
+                    if e.button == 1:
                         if current == EMPTY: env.grid[gx][gy] = HAZARD
                         elif current == HAZARD: env.grid[gx][gy] = SAFE
                         elif current == SAFE: env.grid[gx][gy] = DEPOT
                         elif current == DEPOT: env.grid[gx][gy] = EMPTY
-                    elif e.button == 3: # Right Click
+                    elif e.button == 3:
                         if current == EMPTY: env.grid[gx][gy] = DEPOT
                         elif current == DEPOT: env.grid[gx][gy] = SAFE
                         elif current == SAFE: env.grid[gx][gy] = HAZARD
@@ -594,8 +598,6 @@ def main():
                     paused = True
                     print("Simulation FULL Reset.")
                 elif e.key == pygame.K_t: show_ui = not show_ui
-                
-                # HRI
                 elif e.key == pygame.K_a:
                     env.hri_active = not env.hri_active
                     print(f"HRI Active: {env.hri_active}")
