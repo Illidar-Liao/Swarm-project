@@ -19,47 +19,49 @@ This simulation is written in Python and uses the `pygame` library for visualiza
 2. Install the required dependency:
    ```bash
    pip install pygame
-🚀 How to Run the Simulation
+
+## 🚀 How to Run the Simulation
 Run the main Python script from your terminal:
 
 Bash
 python SwarmWorld.py
 (Note: The simulation starts in a PAUSED state. Press SPACE to begin.)
 
-🎮 Interactive Controls
+## 🎮 Interactive Controls
 You can interact with the simulation in real-time using the following controls:
 
 Keyboard Controls:
-SPACE: Play / Pause simulation.
+`SPACE`: Play / Pause simulation.
 
-R: Full Reset (rebuilds landscape and resets agents).
+`R`: Full Reset (rebuilds landscape and resets agents).
 
-H: Hide/Show the swarm (useful for observing just the Mission Robot).
+`H`: Hide/Show the swarm (useful for observing just the Mission Robot).
 
-S: Save the current map layout to custom_map.csv.
+`S`: Save the current map layout to `custom_map.csv`.
 
-L: Load a map layout (defaults to wide_river.csv).
+`L`: Load a map layout (defaults to `wide_river.csv`).
 
-T: Toggle the UI overlay.
+`T`: Toggle the UI overlay.
 
-A: Toggle HRI (Human-Robot Interaction) Anchor Mode.
+`A`: Toggle HRI (Human-Robot Interaction) Anchor Mode.
 
-Arrow Keys: Move the HRI Anchor (only works when HRI is active).
+`Arrow Keys`: Move the HRI Anchor (only works when HRI is active).
 
-Mouse Controls (Map Editing):
+**Mouse Controls (Map Editing):**
+
 You can dynamically alter the environment by clicking on grid cells:
 
-Left Click: Cycles cell type -> Empty > Hazard > Safe > Depot
+**Left Click:** Cycles cell type -> Empty > Hazard > Safe > Depot
 
-Right Click: Cycles cell type in reverse -> Depot > Safe > Hazard > Empty
+**Right Click:** Cycles cell type in reverse -> Depot > Safe > Hazard > Empty
 
-🎛️ Adjusting Simulation Parameters
-To test different algorithmic behaviors, you can adjust the following parameters directly inside SwarmWorld.py:
+## 🎛️ Adjusting Simulation Parameters
+To test different algorithmic behaviors, you can adjust the following parameters directly inside `SwarmWorld.py`:
 
-Pure vs. Persistent Random Walk (Inertia):
-By default, the simulation runs a Pure Random Walk baseline. To enable the Persistent Random Walk, navigate to the Builder.move() method (around line 185) and uncomment the INERTIA section:
+- **Pure vs. Persistent Random Walk (Inertia):**
+By default, the simulation runs a Pure Random Walk baseline. To enable the Persistent Random Walk, navigate to the `Builder.move()` method (around line 185) and uncomment the INERTIA section:
 
-Python
+```Python
 # --- INERTIA ---
 if self.bias_strength > 0:
     dx = mx - self.x; dy = my - self.y
@@ -68,22 +70,27 @@ if self.bias_strength > 0:
         bonus = 20.0 * self.bias_strength
         if align > 0.5: w += bonus
         else: w += (bonus/4)
-Nucleation Rate (Bridge Building):
+```
+- **Nucleation Rate (Bridge Building):**
 This controls the probability that a robot will drop a brick in the hazard zone without being supported by an existing safe tile.
-Navigate to the Builder.try_build() method (around line 207). Change the < 0.1 value to adjust the 10% nucleation chance:
+Navigate to the `Builder.try_build()` method (around line 207). Change the `< 0.1` value to adjust the 10% nucleation chance:
 
-Python
+```Python
 if self.can_nucleate and not supported and random.random() < 0.1: 
-HRI Attraction Strength:
-When HRI is active (A key), robots holding bricks are drawn to the anchor. You can adjust the gravitational pull of the anchor in the Builder.move() method (around line 178) by changing w += 20.0.
+```
+- **HRI Attraction Strength:**
+When HRI is active (`A` key), robots holding bricks are drawn to the anchor. You can adjust the gravitational pull of the anchor in the `Builder.move()` method (around line 178) by changing `w += 20.0`.
 
-📊 Data Output & Logging
+## 📊 Data Output & Logging
 Upon the Mission Robot successfully reaching the goal, the simulation will automatically pause and generate the following data logs in the root directory:
 
-simulation_log.csv: Time series data of steps, built tiles, and hazards.
+- `simulation_log.csv`: Time series data of steps, built tiles, and hazards.
 
-agent_durations.csv: A log of how many steps agents spent searching vs. transporting.
+- `agent_durations.csv`: A log of how many steps agents spent searching vs. transporting.
 
-simulation_summary.txt: An overview of total time, averages, and active agents.
+- `simulation_summary.txt`: An overview of total time, averages, and active agents.
 
-/trajectories/: A folder containing images of the specific paths taken by every individual Builder robot.
+- `/trajectories/`: A folder containing images of the specific paths taken by every individual Builder robot.
+
+## 🙏 Acknowledgements
+This project was developed as the Capstone for the M.S. Robotics program at the University of Minnesota. Special thanks to my advisor, Prof. Maria Gini, and my committee members, Prof. Nikolaos Papanikolopoulos and Prof. Stephen Guy.
